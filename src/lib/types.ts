@@ -83,7 +83,7 @@ export type Message = {
 };
 
 /** One chat thread with a dot (like a ChatGPT conversation). Memory, skills and rules are shared across them. */
-export type Conversation = { id: string; dotId: string; title: string; createdAt: number; updatedAt: number };
+export type Conversation = { id: string; dotId: string; title: string; providerModel: string | null; createdAt: number; updatedAt: number };
 
 /** A group chat: the user talks to several dots; the lead coordinates and delegates to members. */
 export type Channel = { id: string; name: string; leadId: string; memberIds: string[]; createdAt: number };
@@ -150,6 +150,9 @@ export type ComputerInfo = {
   image: string;
   model: string; // default model for dots without their own choice
   models: string[]; // models the API key can use
+  modelLabels: Record<string, string>;
+  chatgpt: { id: string; label: string; subject: string; status: "ready" | "signed_out" | "reauth_required" | "plan_disabled"; error: string | null }[];
+  chatgptError: string | null;
   computerTool: string;
   hasKey: boolean;
   keySource: "env" | "settings" | null;

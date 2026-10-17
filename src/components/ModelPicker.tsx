@@ -32,16 +32,17 @@ export default function ModelPicker({
   compact?: boolean;
 }) {
   const models = useStore((s) => s.computer.models);
+  const labels = useStore((s) => s.computer.modelLabels);
   const fallback = useStore((s) => s.computer.model);
   const [open, setOpen] = useState(false);
   const current = value ?? fallback;
   const list = models.length ? models : fallback ? [fallback] : [];
   const options: { id: string | null; label: string; sub: string | null; group?: string }[] = [
-    ...(allowDefault ? [{ id: null, label: "Default", sub: fallback ? label(fallback) : null }] : []),
+    ...(allowDefault ? [{ id: null, label: "Default", sub: fallback ? labels[fallback] ?? label(fallback) : null }] : []),
     ...list.map((id, i) => ({
       id,
-      label: label(id),
-      sub: hint(id),
+      label: labels[id] ?? label(id),
+      sub: id.startsWith("chatgpt:") ? "ChatGPT plan" : hint(id),
       // a heading above the first open model (and above OpenAI's when both are there)
       group: id.startsWith(OPEN) && !list[i - 1]?.startsWith(OPEN) ? "Open models" : i === 0 && list.some((m) => m.startsWith(OPEN)) ? "OpenAI" : undefined,
     })),
@@ -64,7 +65,7 @@ export default function ModelPicker({
       >
         <Cpu className="size-3.5 text-foreground/45" strokeWidth={1.75} />
         {value === null && allowDefault ? <span className="text-foreground/45">Default ·</span> : null}
-        <span className="max-w-40 truncate">{current ? label(current) : "Loading…"}</span>
+        <span className="max-w-40 truncate">{current ? labels[current] ?? label(current) : "Loading…"}</span>
         <ChevronDown className={`size-3.5 text-foreground/40 transition-transform ${open ? "rotate-180" : ""}`} strokeWidth={1.75} />
       </button>
 

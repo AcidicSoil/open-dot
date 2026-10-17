@@ -168,7 +168,7 @@ function onEvent(e: Incoming) {
   if (!t) return;
   if (!t.enabled) return;
   repo.updateTrigger(t.id, { lastFiredAt: Date.now(), lastError: null });
-  runTrigger(t, e.payload ?? e.originalPayload ?? {});
+  void runTrigger(t, e.payload ?? e.originalPayload ?? {}).catch(() => repo.updateTrigger(t.id, { lastError: "Could not start work. Check the selected provider in Settings." }));
 }
 
 /** Listen for this install's trigger events (idempotent; call at boot and after the key changes). */

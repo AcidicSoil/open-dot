@@ -1,0 +1,11 @@
+ts	phase	decision	why	evidence	result
+2026-10-15T22:05:38.574165+00:00	frame	Limit delivery to Stage 1	User confirmed Stage 1 and later stages have acceptance gates	open-dot-windows-wsl-spec.md	scoped
+2026-10-15T22:05:38.574192+00:00	design	Use account-qualified model references and pinned conversations	Existing picker and history storage avoid another selection system	src/server/agent/client.ts	independent design review agrees
+2026-10-15T22:05:38.574195+00:00	auth	Replace incomplete delegated auth implementations	Initial workers omitted protocol and identity requirements	src/server/agent/chatgpt.ts	implemented by root
+2026-10-15T22:05:38.574197+00:00	verify	Run live OAuth negative checks through server actions	Compilation does not prove callback behavior	http://127.0.0.1:3199/settings	stable host and fresh state and PKCE and denied consent verified
+2026-10-15T22:05:38.574199+00:00	review	Fix approval race and streamed output text	Independent reviewer found duplicate action and discarded response risks	src/server/agent/runtime.ts	fixed
+2026-10-15T22:05:38.574200+00:00	acceptance	Wait for authorized account sign-in	Account entitlement and inference require actual credentials	open-dot-windows-wsl-spec.md	INCONCLUSIVE
+2026-10-15T22:08:20.366862+00:00	review	Isolate model discovery failures per account	A failing account must not hide healthy accounts	src/server/agent/chatgpt.ts	fixed after final review
+2026-10-15T22:08:20.366879+00:00	migration	Mark historical conversations with unknown provider explicitly	Current defaults cannot prove the billing provider of old history	src/server/db.ts	records preserved and new chat required
+2026-10-15T22:08:20.366882+00:00	verification	Production build and lint pass	Verify the actual application before account acceptance	README.md	build passed and lint had zero errors with existing warnings
+2026-10-15T22:11:08.598840+00:00	final review	Material findings fixed and independently rechecked	Keep account acceptance separate from code review	.audit/stage-one-acceptance.md	No remaining material code findings and account acceptance INCONCLUSIVE

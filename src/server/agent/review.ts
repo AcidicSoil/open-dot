@@ -2,6 +2,7 @@ import "server-only";
 import { clientFor, models } from "./client";
 import * as repo from "../repo";
 import type { Rule, RuleDecision } from "@/lib/types";
+import { completedResponse } from "./inference";
 
 // "Your dot knows when to take action, and when to ask for approval."
 // Users write rules as "When your dot wants to <action>, it should <allow|ask|never>".
@@ -9,20 +10,18 @@ import type { Rule, RuleDecision } from "@/lib/types";
 
 export type Verdict = { decision: RuleDecision; rule: Rule | null };
 
-export async function review(dotId: string, action: string, fallback: RuleDecision): Promise<Verdict> {
+export async function review(dotId: string, action: string, fallback: RuleDecision, providerModel?: string): Promise<Verdict> {
   const rules = repo.rulesFor(dotId);
   if (!rules.length) return { decision: fallback, rule: null };
 
   const list = rules.map((r, i) => `${i + 1}. When the dot wants to ${r.action} → ${r.decision === "allow" ? "allow automatically" : r.decision === "ask" ? "ask first" : "never allow"}`).join("\n");
   try {
-    const { client, model, stateless } = clientFor((await models()).review);
-    const res = await client.responses.create({
-      model,
-      ...(stateless ? { store: false } : {}),
+    const binding = await clientFor(providerModel ?? (await models()).review);
+    const res = await completedResponse(binding, {
       instructions:
         "You gate actions of a personal AI agent. Decide which of the user's rules (if any) apply to the pending action. " +
         "A rule applies only if the action clearly falls under it. Return the numbers of every applying rule; return an empty list if none apply.",
-      input: `Rules:\n${list}\n\nPending action: the dot wants to ${action}`,
+      input: [{ role: "user", content: `Rules:\n${list}\n\nPending action: the dot wants to ${action}` }],
       text: {
         format: {
           type: "json_schema",
@@ -45,6 +44,6 @@ export async function review(dotId: string, action: string, fallback: RuleDecisi
     return { decision: rule.decision, rule };
   } catch {
     // If the reviewer is unavailable, be conservative for anything not explicitly safe.
-    return { decision: fallback === "allow" ? "allow" : "ask", rule: null };
+    return { decision: "ask", rule: null };
   }
 }

@@ -43,9 +43,13 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS passwords (id TEXT PRIMARY KEY, site TEXT NOT NULL, username TEXT NOT NULL, secret TEXT NOT NULL, created_at INTEGER NOT NULL);
 `;
 
-const g = globalThis as unknown as { __dotsDb?: DatabaseSync };
+const g = globalThis as unknown as { __dotsDb?: DatabaseSync; __dotsDbDataDir?: string };
 
 export function db(): DatabaseSync {
+  const dataDir = path.resolve(DATA_DIR);
+  if (g.__dotsDb && g.__dotsDbDataDir !== dataDir) {
+    throw new Error("Data directory changed while the database is cached; restart required");
+  }
   if (!g.__dotsDb) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const conn = new DatabaseSync(path.join(DATA_DIR, "dots.db"));
@@ -53,6 +57,7 @@ export function db(): DatabaseSync {
     conn.exec(SCHEMA);
     migrate(conn);
     g.__dotsDb = conn;
+    g.__dotsDbDataDir = dataDir;
   }
   return g.__dotsDb;
 }
@@ -63,8 +68,21 @@ function migrate(conn: DatabaseSync) {
   if (!cols.includes("model")) conn.exec("ALTER TABLE dots ADD COLUMN model TEXT");
   if (!cols.includes("box_id")) conn.exec("ALTER TABLE dots ADD COLUMN box_id TEXT");
   const convCols = conn.prepare("PRAGMA table_info(conversations)").all().map((c) => (c as { name: string }).name);
-  // Model-facing history for providers that don't keep conversation state (OpenRouter).
+  // Model-facing history for providers that don't keep conversation state.
   if (convCols.length && !convCols.includes("history")) conn.exec("ALTER TABLE conversations ADD COLUMN history TEXT");
+  conn.exec("CREATE TABLE IF NOT EXISTS schema_versions (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)");
+  if (!conn.prepare("SELECT version FROM schema_versions WHERE version = 1").get()) {
+    conn.exec("BEGIN IMMEDIATE");
+    try {
+      if (!convCols.includes("provider_model")) conn.exec("ALTER TABLE conversations ADD COLUMN provider_model TEXT");
+      conn.exec("UPDATE conversations SET provider_model = 'legacy:unknown' WHERE provider_model IS NULL AND (thread IS NOT NULL OR history IS NOT NULL OR pending IS NOT NULL)");
+      conn.prepare("INSERT INTO schema_versions (version, applied_at) VALUES (1, ?)").run(Date.now());
+      conn.exec("COMMIT");
+    } catch (error) {
+      conn.exec("ROLLBACK");
+      throw error;
+    }
+  }
   const msgCols = conn.prepare("PRAGMA table_info(messages)").all().map((c) => (c as { name: string }).name);
   if (!msgCols.includes("attachments")) conn.exec("ALTER TABLE messages ADD COLUMN attachments TEXT");
   if (!msgCols.includes("channel_id")) conn.exec("ALTER TABLE messages ADD COLUMN channel_id TEXT");
@@ -81,6 +99,18 @@ function migrate(conn: DatabaseSync) {
       conn.prepare("INSERT INTO conversations (id, dot_id, title, thread, pending, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(convId, d.id, "First chat", d.thread, d.pending, span.a, span.b);
       conn.prepare("UPDATE messages SET conversation_id = ? WHERE dot_id = ? AND channel_id IS NULL").run(convId, d.id);
+    }
+  }
+  if (!conn.prepare("SELECT version FROM schema_versions WHERE version = 2").get()) {
+    conn.exec("BEGIN IMMEDIATE");
+    try {
+      // Repair databases where v1 ran before legacy messages were assigned conversations.
+      conn.exec("UPDATE conversations SET provider_model = 'legacy:unknown' WHERE provider_model IS NULL AND (thread IS NOT NULL OR history IS NOT NULL OR pending IS NOT NULL OR EXISTS (SELECT 1 FROM messages WHERE messages.conversation_id = conversations.id))");
+      conn.prepare("INSERT INTO schema_versions (version, applied_at) VALUES (2, ?)").run(Date.now());
+      conn.exec("COMMIT");
+    } catch (error) {
+      conn.exec("ROLLBACK");
+      throw error;
     }
   }
 }

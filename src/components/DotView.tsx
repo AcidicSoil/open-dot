@@ -26,6 +26,8 @@ function IconLink({ href, active, label, children }: { href: string; active?: bo
 export default function DotView({ dotId, tab, conversation }: { dotId: string; tab: Tab; conversation?: string }) {
   const dot = useStore((s) => s.dots.find((d) => d.id === dotId));
   const loaded = useStore((s) => s.loaded);
+  const activeConversation = useStore((s) => conversation === "new" ? undefined : s.conversations.find((c) => c.id === conversation) ?? s.conversations.filter((c) => c.dotId === dotId).sort((a, b) => b.updatedAt - a.updatedAt)[0]);
+  const modelLabels = useStore((s) => s.computer.modelLabels);
   const [pending, start] = useTransition();
 
   if (!dot) {
@@ -51,7 +53,11 @@ export default function DotView({ dotId, tab, conversation }: { dotId: string; t
 
         <div className="ml-auto flex shrink-0 items-center gap-0.5 sm:gap-1">
           <span className="hidden items-center sm:flex">
+            <span className="mr-1 text-caption text-foreground/45">New chats</span>
             <ModelPicker compact value={dot.model} onChange={(m) => start(() => setDotModel(dot.id, m))} />
+            <span className="ml-2 max-w-40 truncate text-caption text-foreground/45" title={activeConversation?.providerModel ?? undefined}>
+              {activeConversation?.providerModel ? `Active: ${modelLabels[activeConversation.providerModel] ?? activeConversation.providerModel}` : "New chat model"}
+            </span>
             <span className="mx-1 h-5 w-px bg-black/[0.08]" />
           </span>
           {tab === "chat" ? (

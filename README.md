@@ -34,6 +34,18 @@ Then in **Settings**:
 
 Your data stays in `~/Library/Application Support/Open Dot`.
 
+## Use a ChatGPT plan from source
+
+In **Settings**, select **Continue with ChatGPT** and finish authorization in your browser. Eligible accounts can use their ChatGPT plan through the public Responses API. Sign-in alone does not prove inference access.
+
+Select **Refresh models**, then choose an account's model in **Default model** for new chats. Existing chats retain their provider, account, and model across restart. Subscription requests do not fall back to an API key when access fails. If usage is limited, check ChatGPT settings and usage, then refresh models to retry.
+
+Chats created before provider binding was introduced remain readable. Their original provider cannot be established safely from the stored history. Start a new chat with an explicitly selected model to continue work.
+
+ChatGPT uses the existing browser page tools. Native computer tools, hosted search, and subscription voice are disabled. Voice still requires an OpenAI API key. Credentials use the existing encrypted vault. Signing out stops local requests and attempts remote session revocation. If revocation fails, disconnect Open Dot in ChatGPT Settings.
+
+This is Stage 1 of the Windows and WSL work. Windows packaging, Windows credential protection, and the later execution adapters are not included. Real account inference, browser tool calls, approvals, restart continuation, and refresh must pass acceptance before Stage 1 is complete.
+
 ## Run it from source
 
 You'll need Node 22 or newer, pnpm and Google Chrome (Playwright's Chromium works if Chrome isn't installed).
@@ -57,6 +69,7 @@ In development everything is stored in `.data/` in the project folder.
 | `DOTS_REVIEW_MODEL` | `gpt-5.4-mini` | Checks actions against your rules and names chats |
 | `DOTS_VOICE_MODEL` | `gpt-realtime-2.1` | Voice calls |
 | `DOTS_COMPUTER_TOOL` | `computer` | `computer` lets the model see and click the screen, `off` limits it to opening pages and reading them |
+| `DOTS_CHATGPT_USAGE` | `default` | Set to `conserve` and restart to use low reasoning, 2,048-token replies, 8-step continuation, and local conversation titles for ChatGPT subscription requests |
 | `E2B_API_KEY` | none | Cloud computers, unless you paste the key in Settings |
 | `DOTS_COMPUTER` | picked automatically | Force `cloud`, `docker` or `local` |
 | `DOTS_BOX_IMAGE` | `node:22-bookworm` | Container image when dots run in Docker |
@@ -69,6 +82,7 @@ In development everything is stored in `.data/` in the project folder.
 - Routines and triggers only run while the app is open. A routine that comes due while your Mac is asleep gets skipped, and so do trigger events that arrive then.
 - Most triggers fire within seconds. Ones with an Interval setting, like Gmail's, can take up to that many minutes.
 - Open models don't get OpenAI's computer tool. They click and type by the text on the page instead, which works on most sites but not on things drawn on a canvas. Voice calls still need an OpenAI key.
+- `DOTS_CHATGPT_USAGE=conserve` can reduce response depth and continuation length. It does not promise quota savings.
 - For bookings and purchases, the site needs a card saved in your account there, or you take over for the payment step.
 - Open Dot isn't affiliated with OpenAI.
 

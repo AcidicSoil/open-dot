@@ -18,7 +18,7 @@ function schedule(routineId: string) {
     routineId,
     new Cron(routine.schedule, { protect: true }, () => {
       const fresh = repo.getRoutine(routineId);
-      if (fresh) runRoutine(fresh);
+      if (fresh) void runRoutine(fresh).catch(() => repo.addMessage({ dotId: fresh.dotId, role: "system", text: "Routine could not start. Check the selected provider in Settings." }));
     }),
   );
 }

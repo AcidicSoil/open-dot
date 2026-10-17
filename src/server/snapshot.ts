@@ -3,6 +3,7 @@ import * as repo from "./repo";
 import { dockerAvailable, BOX_IMAGE } from "./computer/shell";
 import { defaultMode } from "./computer";
 import { knownModels, hasKey, keySource } from "./agent/client";
+import { chatGPTAccounts, chatGPTAuthError, knownChatGPTModels } from "./agent/chatgpt";
 import { COMPUTER_ENABLED } from "./agent/tools";
 import { skyInstalled } from "./computer/sky";
 import { cloudKeySource } from "./computer/cloud";
@@ -19,7 +20,10 @@ export function computerInfo(): ComputerInfo {
     image: BOX_IMAGE,
     model: m.defaultModel,
     models: m.available,
-    computerTool: COMPUTER_ENABLED ? "computer" : "off",
+    modelLabels: Object.fromEntries(knownChatGPTModels().map((model) => [model.id, model.label])),
+    chatgpt: chatGPTAccounts(),
+    chatgptError: chatGPTAuthError(),
+    computerTool: COMPUTER_ENABLED && !m.defaultModel.startsWith("chatgpt:") && !m.defaultModel.startsWith("openrouter:") ? "computer" : "off",
     hasKey: hasKey(),
     keySource: keySource(),
     cloudKey: cloudKeySource(),

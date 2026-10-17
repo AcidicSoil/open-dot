@@ -113,7 +113,7 @@ export function deleteDot(dotId: string) {
 // Routines and channel work use hidden conversations (kind "routine" / "channel") so they don't clutter the list.
 
 const toConversation = (r: Row): Conversation => ({
-  id: r.id as string, dotId: r.dot_id as string, title: r.title as string, createdAt: r.created_at as number, updatedAt: r.updated_at as number,
+  id: r.id as string, dotId: r.dot_id as string, title: r.title as string, providerModel: (r.provider_model as string) ?? null, createdAt: r.created_at as number, updatedAt: r.updated_at as number,
 });
 
 export function listConversations(dotId?: string): Conversation[] {
@@ -135,6 +135,26 @@ export function createConversation(dotId: string, title = "New chat", kind = "ch
   const c = getConversation(convId)!;
   if (kind === "chat") emit({ type: "conversation", data: c });
   return c;
+}
+
+export function bindModel(convId: string, desired: string): string {
+  const d = db();
+  const existing = d.prepare("SELECT provider_model FROM conversations WHERE id = ?").get(convId) as Row | undefined;
+  if (!existing) throw new Error("No such conversation");
+  if (existing?.provider_model) return existing.provider_model as string;
+  d.prepare("UPDATE conversations SET provider_model = ? WHERE id = ? AND provider_model IS NULL").run(desired, convId);
+  const bound = d.prepare("SELECT provider_model FROM conversations WHERE id = ?").get(convId) as Row | undefined;
+  if (!bound?.provider_model) throw new Error("Conversation could not be bound to a provider");
+  return bound.provider_model as string;
+}
+
+export function conversationModel(convId: string): string | null {
+  const r = db().prepare("SELECT provider_model FROM conversations WHERE id = ?").get(convId) as Row | undefined;
+  return (r?.provider_model as string) ?? null;
+}
+
+export function dotsUsingAccount(accountId: string): string[] {
+  return (db().prepare("SELECT DISTINCT dot_id FROM conversations WHERE substr(provider_model, 1, ?) = ?").all(`chatgpt:${accountId}:`.length, `chatgpt:${accountId}:`) as { dot_id: string }[]).map((row) => row.dot_id);
 }
 
 /** A conversation reused across runs: a routine's (listed, kind "chat") or a dot's work in a channel (hidden). */

@@ -9,6 +9,7 @@ import { emit } from "@/server/bus";
 import { computerInfo } from "@/server/snapshot";
 import { models, resetModels, saveApiKey } from "@/server/agent/client";
 import { saveOpenRouterKey } from "@/server/agent/openrouter";
+import { startChatGPTSignIn, signOutChatGPT, chatGPTModels } from "@/server/agent/chatgpt";
 import * as triggers from "@/server/triggers";
 import * as composio from "@/server/composio";
 import * as voice from "@/server/voice";
@@ -41,7 +42,7 @@ export async function deleteDot(dotId: string) {
 
 export async function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string) {
   if (!text.trim() && !attachments.length) return;
-  runtime.sendMessage(dotId, text.trim(), attachments, conversationId);
+  await runtime.sendMessage(dotId, text.trim(), attachments, conversationId);
   const conv = conversationId ? repo.getConversation(conversationId) : null;
   if (conv?.title === "New chat") void autoTitle(conv.id, text || attachments.map((a) => a.name).join(", "));
 }
@@ -51,7 +52,7 @@ export async function sendMessage(dotId: string, text: string, attachments: Atta
 /** Start a new conversation with its first message. Returns the conversation id. */
 export async function startConversation(dotId: string, text: string, attachments: Attachment[] = []): Promise<string> {
   const conv = repo.createConversation(dotId);
-  runtime.sendMessage(dotId, text.trim(), attachments, conv.id);
+  await runtime.sendMessage(dotId, text.trim(), attachments, conv.id);
   void autoTitle(conv.id, text || attachments.map((a) => a.name).join(", "));
   return conv.id;
 }
@@ -128,7 +129,7 @@ export async function toggleRoutine(routineId: string, enabled: boolean) {
 
 export async function runRoutineNow(routineId: string) {
   const r = repo.getRoutine(routineId);
-  if (r) runtime.runRoutine({ ...r, enabled: true });
+  if (r) await runtime.runRoutine({ ...r, enabled: true });
 }
 
 export async function deleteRoutine(routineId: string) {
@@ -177,6 +178,7 @@ export async function resetComputer(dotId: string) {
 
 /** Pick a model for one dot (null = follow the default). */
 export async function setDotModel(dotId: string, model: string | null) {
+  if (model !== null && !(await models()).available.includes(model)) throw new Error("That model is unavailable. Refresh models in Settings.");
   repo.updateDot(dotId, { model });
 }
 
@@ -266,8 +268,38 @@ export async function setCloudKey(key: string): Promise<string | null> {
 }
 
 export async function setDefaultModel(model: string | null) {
+  if (model !== null && !(await models()).available.includes(model)) throw new Error("That model is unavailable. Refresh models in Settings.");
   setSetting("default_model", model);
   emit({ type: "computer", data: computerInfo() });
+}
+
+export async function signInChatGPT(accountId?: string): Promise<{ url?: string; error?: string }> {
+  try {
+    return await startChatGPTSignIn(accountId);
+  } catch {
+    return { error: "Couldn't start ChatGPT sign-in. Check the local server and try again." };
+  }
+}
+
+export async function signOutChatGPTAccount(accountId: string): Promise<string | null> {
+  for (const dotId of repo.dotsUsingAccount(accountId)) runtime.stop(dotId);
+  const warning = await signOutChatGPT(accountId);
+  resetModels();
+  emit({ type: "computer", data: computerInfo() });
+  return warning;
+}
+
+export async function refreshChatGPTModels(): Promise<string | null> {
+  try {
+    await chatGPTModels(true);
+    resetModels();
+    await models();
+    emit({ type: "computer", data: computerInfo() });
+    return null;
+  } catch {
+    emit({ type: "computer", data: computerInfo() });
+    return "Couldn't refresh ChatGPT models. Check the account status and try again.";
+  }
 }
 
 // ---------- Composio For You (the user's apps) ----------
@@ -337,7 +369,7 @@ export async function saveVoiceLine(dotId: string, convId: string, who: "you" | 
 
 /** send_task from a voice call: hand the job to the dot's working self, in the same chat. */
 export async function sendVoiceTask(dotId: string, convId: string, request: string) {
-  if (request.trim()) runtime.queueTask(dotId, request.trim(), convId);
+  if (request.trim()) await runtime.queueTask(dotId, request.trim(), convId);
 }
 
 // ---------- channels (group chats) ----------
@@ -359,5 +391,5 @@ export async function deleteChannel(channelId: string) {
 }
 
 export async function sendChannelMessage(channelId: string, text: string) {
-  if (text.trim()) runtime.sendToChannel(channelId, text.trim());
+  if (text.trim()) await runtime.sendToChannel(channelId, text.trim());
 }

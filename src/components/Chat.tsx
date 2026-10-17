@@ -45,7 +45,7 @@ export default function Chat({ dot, conversation }: { dot: Dot; conversation?: s
   const mine = useMemo(() => conversations.filter((c) => c.dotId === dot.id).sort((a, b) => b.updatedAt - a.updatedAt), [conversations, dot.id]);
   const convId = conversation === "new" ? null : conversation ?? mine[0]?.id ?? null;
   const messages = useMemo(() => (convId ? all.filter((m) => m.conversationId === convId && !m.channelId) : []), [all, convId]);
-  const hasKey = useStore((s) => s.computer.hasKey || s.computer.openRouter !== null);
+  const hasKey = useStore((s) => s.computer.hasKey || s.computer.openRouter !== null || s.computer.chatgpt.some((account) => account.status === "ready"));
   const [, start] = useTransition();
   // A chat counts as started once you've written, or talked in voice mode.
   const fresh = !messages.some((m) => m.role === "user" || m.from === "voice");
@@ -113,7 +113,7 @@ export default function Chat({ dot, conversation }: { dot: Dot; conversation?: s
             <div className="mb-2 flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/[0.08] px-3.5 py-2 text-body-sm">
               <ShieldAlert className="size-4 text-warning" strokeWidth={1.75} />
               <span>
-                Add an OpenAI or OpenRouter key in{" "}
+                Connect ChatGPT or add an API key in{" "}
                 <Link href="/settings#api-key" className="underline underline-offset-2">
                   Settings
                 </Link>{" "}
@@ -174,6 +174,7 @@ async function uploadFiles(dotId: string, list: File[]): Promise<{ files?: Attac
 }
 
 function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, attachments: Attachment[]) => void; onVoice: () => void }) {
+  const voiceAvailable = useStore((s) => s.computer.hasKey);
   const [text, setText] = useState("");
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -301,8 +302,9 @@ function Composer({ dot, onSend, onVoice }: { dot: Dot; onSend: (text: string, a
             <button
               className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground text-card transition-opacity hover:opacity-85"
               onClick={onVoice}
+              disabled={!voiceAvailable}
               aria-label={`Voice mode with ${dot.name}`}
-              title="Voice mode"
+              title={voiceAvailable ? "Voice mode" : "Voice requires an OpenAI API key in Settings"}
             >
               <AudioLines className="size-4" strokeWidth={2} />
             </button>

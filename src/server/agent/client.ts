@@ -3,6 +3,9 @@ import OpenAI from "openai";
 import { getSetting, setSetting } from "../db";
 import { seal, unseal } from "../vault";
 import { isOpenRouterModel, openModels, openRouterId, openRouterKey, openrouter, preferredOpenModel, smallOpenModel } from "./openrouter";
+import { chatGPTAccounts, chatGPTModels, knownChatGPTModels, chatGPTClient } from "./chatgpt";
+import { chatGPTUsage } from "./usage";
+import * as repo from "../repo";
 
 // Models are chosen from what the API key can actually use. Precedence for a dot's model:
 // the dot's own choice → the default picked in Settings → DOTS_MODEL → best available.
@@ -12,8 +15,8 @@ const REVIEW_PREFERENCE = ["gpt-5.4-mini", "gpt-5-mini", "gpt-5.4-nano", "gpt-5-
 const g = globalThis as unknown as {
   __dotsOpenAI?: OpenAI;
   __dotsOpenAIKey?: string;
-  __dotsModels?: Promise<{ main: string; review: string; available: string[] }>;
-  __dotsResolved?: { main: string; review: string; available: string[] };
+  __dotsModels?: Promise<{ main: string; review: string; available: string[]; modelLabels: Record<string, string> }>;
+  __dotsResolved?: { main: string; review: string; available: string[]; modelLabels: Record<string, string> };
 };
 
 // The key comes from OPENAI_API_KEY (development) or from Settings, sealed with the vault key (the desktop app).
@@ -77,21 +80,34 @@ function rank(id: string): number {
 
 async function resolveOpenAI(): Promise<{ main: string; review: string; available: string[] } | null> {
   if (!apiKey()) return null;
-  let ids: string[] = [];
+  const ids: string[] = [];
   try {
     for await (const m of openai().models.list()) ids.push(m.id);
-  } catch (err) {
-    console.warn("[dots] couldn't list models, using defaults:", err instanceof Error ? err.message : err);
-    ids = [];
+  } catch {
+    console.warn("[dots] OpenAI model discovery failed; no API models will be offered.");
+    return null;
   }
-  const set = new Set(ids);
-  const pick = (envVar: string | undefined, prefs: string[]) => envVar || prefs.find((id) => set.has(id)) || prefs[0];
   const available = ids.filter(isAgentModel).sort((a, b) => rank(b) - rank(a) || a.localeCompare(b));
+  if (!available.length) return null;
+  const pick = (envVar: string | undefined, prefs: string[]) =>
+    (envVar && available.includes(envVar) ? envVar : undefined) || prefs.find((id) => available.includes(id)) || available[0];
   return {
     main: pick(process.env.DOTS_MODEL, MAIN_PREFERENCE),
     review: pick(process.env.DOTS_REVIEW_MODEL, REVIEW_PREFERENCE),
-    available: available.length ? available : MAIN_PREFERENCE,
+    available,
   };
+}
+
+function conserveChatGPTModel(models: { id: string }[]): string | undefined {
+  const candidates = models
+    .map(({ id }) => ({ id, slug: id.split(":").slice(2).join(":") }))
+    .filter(({ slug }) => /^gpt-\d+(?:\.\d+)?(?:-|$)/.test(slug));
+  const major = Math.max(...candidates.map(({ slug }) => Number(/^gpt-(\d+)/.exec(slug)?.[1] ?? -1)));
+  if (major < 0) return undefined;
+  const current = candidates.filter(({ slug }) => Number(/^gpt-(\d+)/.exec(slug)?.[1]) === major);
+  const lightweight = current.filter(({ slug }) => /-(?:luna|mini|nano)(?:$|-)/.test(slug));
+  return (lightweight.length ? lightweight : current)
+    .sort((a, b) => b.slug.localeCompare(a.slug, undefined, { numeric: true }))[0]?.id;
 }
 
 /** OpenAI models (with an OpenAI key) first, then open models (with an OpenRouter key). */
@@ -103,10 +119,13 @@ async function resolve() {
       return [] as string[];
     }),
   ]);
+  const chat = await chatGPTModels().catch(() => []);
+  const chatDefault = chatGPTUsage.profile === "conserve" ? conserveChatGPTModel(chat) ?? chat[0]?.id : chat[0]?.id;
   const resolved = {
-    main: oa?.main ?? (open.length ? preferredOpenModel(open) : process.env.DOTS_MODEL || MAIN_PREFERENCE[0]),
-    review: oa?.review ?? (open.length ? smallOpenModel(open) : process.env.DOTS_REVIEW_MODEL || REVIEW_PREFERENCE[0]),
-    available: [...(oa?.available ?? []), ...open],
+    main: oa?.main ?? (open.length ? preferredOpenModel(open) : chatDefault ?? process.env.DOTS_MODEL ?? MAIN_PREFERENCE[0]),
+    review: oa?.review ?? (open.length ? smallOpenModel(open) : chatDefault ?? process.env.DOTS_REVIEW_MODEL ?? REVIEW_PREFERENCE[0]),
+    available: [...(oa?.available ?? []), ...open, ...chat.map((m) => m.id)],
+    modelLabels: Object.fromEntries(chat.map((m) => [m.id, m.label])),
   };
   g.__dotsResolved = resolved;
   console.log(`[dots] default ${resolved.main} (agent), ${resolved.review} (rule review); ${resolved.available.length} models available`);
@@ -120,16 +139,23 @@ export function resetModels() {
 }
 
 /** The API client for a model, the model id that API expects, and whether it keeps conversation state. */
-export function clientFor(model: string): { client: OpenAI; model: string; stateless: boolean } {
-  return isOpenRouterModel(model) ? { client: openrouter(), model: openRouterId(model), stateless: true } : { client: openai(), model, stateless: false };
+export type ProviderBinding = { client: OpenAI; model: string; provider: "openai" | "openrouter" | "chatgpt"; accountId: string | null; stateless: boolean; capabilities: { functionTools: boolean; images: boolean; computer: boolean; search: boolean; voice: boolean } };
+export async function clientFor(model: string): Promise<ProviderBinding> {
+  if (model.startsWith("legacy:")) throw new Error("This older chat's provider could not be identified safely. Start a new chat with an explicitly selected model.");
+  if (model.startsWith("chatgpt:")) {
+    const r = await chatGPTClient(model);
+    return { ...r, provider: "chatgpt", stateless: true, capabilities: { functionTools: true, images: true, computer: false, search: false, voice: false } };
+  }
+  if (isOpenRouterModel(model)) return { client: openrouter(), model: openRouterId(model), provider: "openrouter", accountId: null, stateless: true, capabilities: { functionTools: true, images: true, computer: false, search: true, voice: false } };
+  return { client: openai(), model, provider: "openai", accountId: null, stateless: false, capabilities: { functionTools: true, images: true, computer: true, search: true, voice: false } };
 }
 
-/** True when any model provider is set up (OpenAI or OpenRouter). */
+/** True when a model provider is configured. */
 export function canThink(): boolean {
-  return hasKey() || Boolean(openRouterKey());
+  return hasKey() || Boolean(openRouterKey()) || chatGPTAccounts().some((account) => account.status === "ready");
 }
 
-export function models(): Promise<{ main: string; review: string; available: string[] }> {
+export function models(): Promise<{ main: string; review: string; available: string[]; modelLabels: Record<string, string> }> {
   g.__dotsModels ??= resolve().catch((err) => {
     g.__dotsModels = undefined;
     throw err;
@@ -140,12 +166,20 @@ export function models(): Promise<{ main: string; review: string; available: str
 /** The model a dot should run on right now. */
 export async function modelFor(dotModel: string | null): Promise<string> {
   if (dotModel) return dotModel;
-  return getSetting("default_model") ?? (await models()).main;
+  const selected = getSetting("default_model");
+  if (selected) return selected;
+  const resolved = await models();
+  if (!resolved.available.length) throw new Error("No model is available. Connect an account and choose a model in Settings.");
+  return resolved.main;
+}
+
+export async function conversationModel(convId: string, dotModel: string | null): Promise<string> {
+  return repo.conversationModel(convId) ?? repo.bindModel(convId, await modelFor(dotModel));
 }
 
 /** Best-known model info for display, without blocking. */
-export function knownModels(): { main: string; review: string; available: string[]; defaultModel: string } {
-  const r = g.__dotsResolved ?? { main: process.env.DOTS_MODEL || MAIN_PREFERENCE[0], review: process.env.DOTS_REVIEW_MODEL || REVIEW_PREFERENCE[0], available: [] };
+export function knownModels(): { main: string; review: string; available: string[]; defaultModel: string; modelLabels: Record<string, string> } {
+  const r = g.__dotsResolved ?? { main: process.env.DOTS_MODEL || MAIN_PREFERENCE[0], review: process.env.DOTS_REVIEW_MODEL || REVIEW_PREFERENCE[0], available: [], modelLabels: Object.fromEntries(knownChatGPTModels().map((m) => [m.id, m.label])) };
   return { ...r, defaultModel: getSetting("default_model") ?? r.main };
 }
 

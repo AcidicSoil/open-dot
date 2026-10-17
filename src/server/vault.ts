@@ -11,9 +11,13 @@ import { insertPassword, sealedPasswordFor } from "./repo";
 // are only ever decrypted to type them into a page — never returned to the model or UI.
 
 const SERVICE = "dots-openai-vault";
-const g = globalThis as unknown as { __dotsVaultKey?: Buffer };
+const g = globalThis as unknown as { __dotsVaultKey?: Buffer; __dotsVaultDataDir?: string };
 
 function masterKey(): Buffer {
+  const dataDir = path.resolve(DATA_DIR);
+  if (g.__dotsVaultKey && g.__dotsVaultDataDir !== dataDir) {
+    throw new Error("Data directory changed while the vault key is cached; restart required");
+  }
   if (g.__dotsVaultKey) return g.__dotsVaultKey;
   let hex: string | null = null;
   if (process.platform === "darwin") {
@@ -36,6 +40,7 @@ function masterKey(): Buffer {
     hex = fs.readFileSync(file, "utf8").trim();
   }
   g.__dotsVaultKey = Buffer.from(hex, "hex");
+  g.__dotsVaultDataDir = dataDir;
   return g.__dotsVaultKey;
 }
 

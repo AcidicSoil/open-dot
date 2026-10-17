@@ -3,7 +3,7 @@
 import { useState, useSyncExternalStore, useTransition } from "react";
 import { useSearchParams } from "next/navigation";
 import { Bell, KeyRound, Lock, LogOut, Plus, RefreshCw } from "lucide-react";
-import { connectApp, deletePassword, refreshApps, savePassword, setCloudKey, setDefaultModel, setOpenAIKey, setOpenRouterKey, signInComposio, signOutComposio } from "@/app/actions";
+import { connectApp, deletePassword, refreshApps, savePassword, setCloudKey, setDefaultModel, setOpenAIKey, setOpenRouterKey, signInComposio, signOutComposio, signInChatGPT, signOutChatGPTAccount, refreshChatGPTModels } from "@/app/actions";
 import { useStore } from "@/lib/store";
 import { openAfter } from "@/lib/popup";
 import { Empty, PageHeader, RemoveButton, RuleEditor, Section } from "./SettingsKit";
@@ -121,7 +121,8 @@ export default function SettingsView() {
           </div>
         </Section>
 
-        <Section eyebrow="Engine" title="Models & computers" description="Models come from what your OpenAI key can use, plus open models once you add an OpenRouter key.">
+        <Section eyebrow="Engine" title="Models & computers" description="Choose models from a ChatGPT account or an explicitly configured API provider. Existing chats retain their original provider and model.">
+          <ChatGPTAccounts />
           <ApiKey />
           <OpenModelsKey />
           <CloudKey />
@@ -134,7 +135,7 @@ export default function SettingsView() {
           </div>
           <dl className="surface divide-y divide-black/[0.06]">
             {[
-              ["Models on your key", computer.models.length ? `${computer.models.length} available` : "Loading…", true],
+              ["Available models", computer.models.length ? `${computer.models.length} available` : "No models loaded", true],
               ["Computer use", computer.computerTool === "off" ? "Off (page tools only)" : "OpenAI computer tool", true],
               ["Dot computers", computer.docker ? `Docker containers · ${computer.image}` : "Sandbox folders (start Docker for containers)", computer.docker],
             ].map(([k, v, ok]) => (
@@ -146,6 +147,48 @@ export default function SettingsView() {
           </dl>
         </Section>
       </div>
+    </div>
+  );
+}
+
+function ChatGPTAccounts() {
+  const accounts = useStore((s) => s.computer.chatgpt);
+  const authError = useStore((s) => s.computer.chatgptError);
+  const selectedModel = useStore((s) => s.computer.model);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, start] = useTransition();
+  const groups = accounts.reduce((result, account) => {
+    const email = account.label.split(" · ")[0];
+    const key = email.includes("@") ? email.toLowerCase() : account.subject;
+    const group = result.get(key) ?? [];
+    group.push(account);
+    result.set(key, group);
+    return result;
+  }, new Map<string, typeof accounts>());
+  return (
+    <div className="surface mb-3 space-y-3 p-4">
+      <div className="text-[14px]">ChatGPT plan</div>
+      <p className="text-body-sm text-foreground/55">Sign in with an eligible account, then choose a ChatGPT model below for new chats. Sign-in and model discovery do not confirm inference access. Requests never fall back to paid API keys.</p>
+      {[...groups].map(([subject, connections]) => (
+        <div key={subject} className="border-t border-black/[0.06] pt-3">
+          <div className="text-body-sm">{connections[0].label.split(" · ")[0]}</div>
+          <div className="text-caption text-foreground/55">ChatGPT account · {connections.length} connection{connections.length === 1 ? "" : "s"}</div>
+          <div className="mt-2 space-y-2 pl-3">
+            {connections.map((account) => <div key={account.id} className="flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1"><div className="text-caption">{account.label}</div><div className="text-caption text-foreground/55">{account.status === "ready" ? "Signed in" : account.status === "signed_out" ? "Signed out" : account.status === "plan_disabled" ? "ChatGPT plan permission is disabled" : "Sign in again"}{selectedModel.startsWith(`chatgpt:${account.id}:`) ? " · Selected for new chats" : ""}</div>{account.error && <p role="status" className="text-caption text-destructive">{account.error}</p>}</div>
+              <button className="btn-secondary h-8 px-3 text-[13px]" disabled={pending} onClick={() => start(() => openAfter(() => signInChatGPT(account.id), setError))}>Reconnect</button>
+              {account.status !== "signed_out" && <button className="btn-quiet" disabled={pending} onClick={() => start(async () => setError(await signOutChatGPTAccount(account.id)))}>Sign out</button>}
+            </div>)}
+          </div>
+        </div>
+      ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="btn-primary" disabled={pending} onClick={() => start(() => openAfter(() => signInChatGPT(), setError))}>{accounts.length ? "Add ChatGPT account" : "Continue with ChatGPT"}</button>
+        <button className="btn-quiet" disabled={pending} onClick={() => start(async () => setError(await refreshChatGPTModels()))}>Refresh models</button>
+        <a className="btn-quiet" href="https://chatgpt.com/#settings" target="_blank" rel="noreferrer">ChatGPT settings and usage</a>
+      </div>
+      <p className="text-caption text-foreground/55">ChatGPT uses browser page tools. Native computer tools, hosted search, and subscription voice are disabled. Voice requires a separately configured OpenAI API key.</p>
+      {(error || authError) && <p role="status" className="text-caption text-destructive">{error ?? authError}</p>}
     </div>
   );
 }
@@ -270,7 +313,7 @@ function ApiKey() {
               ? "Connected from OPENAI_API_KEY."
               : computer.hasKey
                 ? "Connected. Stored encrypted on this computer."
-                : "Your dots need one to think. Create one at platform.openai.com."}
+                : "Optional paid API provider. Create a key at platform.openai.com, or use ChatGPT above."}
           </div>
         </div>
         {computer.hasKey && computer.keySource !== "env" && !editing && (

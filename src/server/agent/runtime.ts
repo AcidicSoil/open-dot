@@ -1,11 +1,15 @@
 import "server-only";
+import OpenAI from "openai";
 import type {
-  ResponseComputerToolCall, ResponseFunctionToolCall, ResponseInputContent, ResponseInputItem, Response, Tool,
+  ResponseComputerToolCall, ResponseFunctionToolCall, ResponseInputContent, ResponseInputItem, Response, ResponseOutputItem, Tool,
 } from "openai/resources/responses/responses";
-import { clientFor, isReasoningModel, modelFor, supportsComputerTool } from "./client";
+import { clientFor, conversationModel, isReasoningModel, supportsComputerTool } from "./client";
 import { systemPrompt, type Trigger } from "./prompt";
 import { COMPUTER_ENABLED, findTool, setConsult, toolsForDot, type ToolCtx } from "./tools";
 import { review } from "./review";
+import { completedResponse, inferenceError, terminalError } from "./inference";
+import { recordChatGPTFailure } from "./chatgpt";
+import { chatGPTUsage } from "./usage";
 import * as repo from "../repo";
 import * as computer from "../computer";
 import type { ComputerAction } from "../computer/browser";
@@ -39,30 +43,34 @@ const state = (dotId: string): RunState => {
 
 // ---------------------------------------------------------------- public API
 
-export function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string) {
+export async function sendMessage(dotId: string, text: string, attachments: Attachment[] = [], conversationId?: string) {
   const dot = repo.getDot(dotId);
   if (!dot) throw new Error("No such dot");
   const conv = conversationId ?? repo.latestConversationId(dotId);
+  if (repo.getConversation(conv)?.dotId !== dotId) throw new Error("Conversation belongs to another dot");
   repo.addMessage({ dotId, role: "user", text, attachments, conversationId: conv });
   if (dot.status === "paused") {
     repo.addMessage({ dotId, role: "system", text: `${dot.name} is paused. Resume it to pick this up.`, conversationId: conv });
   }
+  await conversationModel(conv, dot.model);
   state(dotId).inbox.push({ text, trigger: { kind: "chat" }, attachments, conversationId: conv });
   void pump(dotId);
 }
 
 /** Work handed off from a voice call. The user's words are already in the chat as voice lines, so no extra user message. */
-export function queueTask(dotId: string, text: string, conversationId: string) {
+export async function queueTask(dotId: string, text: string, conversationId: string) {
   const dot = repo.getDot(dotId);
   if (!dot) throw new Error("No such dot");
+  if (repo.getConversation(conversationId)?.dotId !== dotId) throw new Error("Conversation belongs to another dot");
   repo.addMessage({ dotId, role: "activity", text: `Voice task · ${text}`, conversationId, channelId: null });
   if (dot.status === "paused") repo.addMessage({ dotId, role: "system", text: `${dot.name} is paused. Resume it to pick this up.`, conversationId });
+  await conversationModel(conversationId, dot.model);
   state(dotId).inbox.push({ text: `${text}\n\n(Asked on a voice call.)`, trigger: { kind: "chat" }, conversationId });
   void pump(dotId);
 }
 
 /** The user posts in a channel: mentioned dots answer (@Name); otherwise the lead does, delegating as needed. */
-export function sendToChannel(channelId: string, text: string) {
+export async function sendToChannel(channelId: string, text: string) {
   const ch = repo.getChannel(channelId);
   if (!ch) throw new Error("No such channel");
   repo.addMessage({ dotId: ch.leadId, role: "user", text, channelId });
@@ -74,33 +82,37 @@ export function sendToChannel(channelId: string, text: string) {
       repo.addMessage({ dotId: d.id, role: "system", text: `${d.name} is paused.`, channelId });
       continue;
     }
+    const conversationId = repo.workConversation(d.id, "channel", channelId, `#${ch.name}`);
+    await conversationModel(conversationId, d.model);
     state(d.id).inbox.push({
       text: `[#${ch.name}] ${text}`,
       trigger: { kind: "channel", channelId, name: ch.name },
-      conversationId: repo.workConversation(d.id, "channel", channelId, `#${ch.name}`),
+      conversationId,
     });
     void pump(d.id);
   }
 }
 
-export function runRoutine(routine: Routine) {
+export async function runRoutine(routine: Routine) {
   const dot = repo.getDot(routine.dotId);
   if (!dot || dot.status === "paused" || !routine.enabled) return;
   repo.updateRoutine(routine.id, { lastRunAt: Date.now() });
   // Each routine keeps its own conversation, so its runs read like a log you can open any time.
   const conv = repo.workConversation(dot.id, "chat", `routine:${routine.id}`, `Routine · ${routine.name}`);
   repo.addMessage({ dotId: dot.id, role: "system", text: `Routine “${routine.name}” started`, from: `routine:${routine.name}`, conversationId: conv });
+  await conversationModel(conv, dot.model);
   state(dot.id).inbox.push({ text: `[Routine: ${routine.name}] ${routine.instruction}`, trigger: { kind: "routine", name: routine.name }, conversationId: conv });
   void pump(dot.id);
 }
 
 /** A Composio trigger fired: run its dot on the instruction, in the trigger's own chat, from a fresh context. */
-export function runTrigger(t: AppTrigger, event: Record<string, unknown>) {
+export async function runTrigger(t: AppTrigger, event: Record<string, unknown>) {
   const dot = repo.getDot(t.dotId);
   if (!dot || dot.status === "paused" || !t.enabled) return;
   const conv = repo.workConversation(dot.id, "chat", `trigger:${t.id}`, `Trigger · ${t.name}`);
   repo.addMessage({ dotId: dot.id, role: "system", text: `Trigger “${t.name}” fired`, from: `trigger:${t.name}`, conversationId: conv });
   const data = JSON.stringify(event, null, 1).slice(0, 6000);
+  await conversationModel(conv, dot.model);
   state(dot.id).inbox.push({ text: `[Trigger: ${t.name}] ${t.instruction}\n\nWhat happened (${t.toolkit} event data):\n${data}`, trigger: { kind: "trigger", name: t.name }, conversationId: conv });
   void pump(dot.id);
 }
@@ -108,6 +120,7 @@ export function runTrigger(t: AppTrigger, event: Record<string, unknown>) {
 export function stop(dotId: string) {
   const s = state(dotId);
   s.inbox = [];
+  s.after = [];
   s.abort?.abort();
 }
 
@@ -137,14 +150,15 @@ export async function resolveCard(messageId: string, choice: "approve" | "deny" 
   const dot = repo.getDot(msg.dotId);
   if (!dot || dot.status === "paused") return;
 
+  const convId = msg.conversationId ?? repo.latestConversationId(dot.id);
   const approved = choice === "approve" || choice === "always";
+  if (approved || choice === "answer") await clientFor(await conversationModel(convId, dot.model));
+  if (repo.getMessage(messageId)?.card?.status !== "pending") return;
+  const pending = parsePending(repo.threadOf(convId).pending);
+  if (!pending || pending.cardId !== messageId) return;
   const status: CardData["status"] = choice === "answer" ? "answered" : approved ? "approved" : "denied";
   repo.updateMessage(messageId, { card: { ...card, status, answer } });
   if (choice === "always" && card.ruleAction) repo.addRule({ dotId: dot.id, action: card.ruleAction, decision: "allow" });
-
-  const convId = msg.conversationId ?? repo.latestConversationId(dot.id);
-  const pending = parsePending(repo.threadOf(convId).pending);
-  if (!pending || pending.cardId !== messageId) return;
 
   await withRun(dot.id, async (signal) => {
     repo.routeToConversation(dot.id, convId);
@@ -212,8 +226,8 @@ async function withRun(dotId: string, fn: (signal: AbortSignal) => Promise<void>
     await fn(s.abort.signal);
   } catch (err) {
     if (!s.abort.signal.aborted) {
-      console.error("[dots] run failed", err);
-      repo.addMessage({ dotId, role: "system", text: `Something went wrong: ${err instanceof Error ? err.message : String(err)}` });
+      console.error("[dots] run failed", inferenceError(err).message);
+      repo.addMessage({ dotId, role: "system", text: `Something went wrong: ${inferenceError(err).message}` });
     }
   } finally {
     s.running = false;
@@ -259,27 +273,29 @@ async function turn(dotId: string, text: string, trigger: Trigger, signal: Abort
     repo.resetThread(conversationId);
     thread = null;
   }
-  const { stateless } = clientFor(await modelFor(dot.model));
+  const { stateless } = await clientFor(await conversationModel(repo.currentConversation(dot.id), dot.model));
   if (!fresh && (stateless ? !repo.getHistory(dotId).length : !thread)) input.unshift(...rebuildContext(dotId, text));
   input.push(userInput(text, attachments));
   await drive(dot, thread, input, trigger, signal);
 }
 
 async function drive(dot: Dot, prevId: string | null, input: ResponseInputItem[], trigger: Trigger, signal: AbortSignal) {
-  for (let step = 0; step < MAX_STEPS; step++) {
+  const { provider } = await clientFor(await conversationModel(repo.currentConversation(dot.id), dot.model));
+  const maxSteps = provider === "chatgpt" ? (chatGPTUsage.maxSteps ?? MAX_STEPS) : MAX_STEPS;
+  for (let step = 0; step < maxSteps; step++) {
     signal.throwIfAborted();
     let resp: Response;
     try {
       resp = await respond(dot, prevId, input, trigger, signal);
     } catch (err) {
-      if (!prevId || signal.aborted || clientFor(await modelFor(dot.model)).stateless || !/previous|not found|No tool output/i.test(String(err))) throw err;
+      if (!prevId || signal.aborted || (await clientFor(await conversationModel(repo.currentConversation(dot.id), dot.model))).stateless || !/previous|not found|No tool output/i.test(String(err))) throw err;
       // The server-side thread is gone or broken: rebuild from our transcript and carry on.
       const userText = input.filter((i) => "role" in i && i.role === "user").map((i) => ("content" in i ? String(i.content) : "")).join("\n");
       input = [...rebuildContext(dot.id, userText), { role: "user", content: userText || "Continue." }];
       prevId = null;
       resp = await respond(dot, null, input, trigger, signal);
     }
-    repo.setThread(dot.id, clientFor(await modelFor(dot.model)).stateless ? null : resp.id, null);
+    repo.setThread(dot.id, (await clientFor(await conversationModel(repo.currentConversation(dot.id), dot.model))).stateless ? null : resp.id, null);
 
     const calls = resp.output.filter((o): o is Call => o.type === "function_call" || o.type === "computer_call");
     if (!calls.length) return;
@@ -288,29 +304,37 @@ async function drive(dot: Dot, prevId: string | null, input: ResponseInputItem[]
     prevId = resp.id;
     input = pending.outputs;
   }
-  repo.addMessage({ dotId: dot.id, role: "system", text: `Stopped after ${MAX_STEPS} steps. Say "continue" to keep going.` });
+  repo.addMessage({ dotId: dot.id, role: "system", text: `Stopped after ${maxSteps} steps. Say "continue" to keep going.` });
 }
 
 /** Stream one model response, mirroring text into the transcript as it arrives. */
 async function respond(dot: Dot, prevId: string | null, input: ResponseInputItem[], trigger: Trigger, signal: AbortSignal): Promise<Response> {
-  const appModel = await modelFor(dot.model);
-  const { client, model, stateless } = clientFor(appModel);
-  const tools: Tool[] = [
-    ...toolsForDot(dot).map((t): Tool => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters, strict: !stateless && t.strict !== false })),
-    // OpenRouter's server-side search: the model decides when to search, same as OpenAI's web_search.
-    stateless ? ({ type: "openrouter:web_search" } as unknown as Tool) : { type: "web_search" },
-  ];
-  if (!stateless && COMPUTER_ENABLED && supportsComputerTool(model)) tools.push({ type: "computer" } as Tool);
+  const appModel = await conversationModel(repo.currentConversation(dot.id), dot.model);
+  const { client, model, stateless, provider, capabilities, accountId } = await clientFor(appModel);
+  const functions = toolsForDot(dot).map((t) => ({ type: "function" as const, name: t.name, description: t.description, parameters: t.parameters, strict: !stateless && t.strict !== false }));
+  const tools: Tool[] = provider === "chatgpt"
+    ? [{ type: "namespace", name: "opendot", description: "Open Dot's local tools and browser actions.", tools: functions }]
+    : [...functions];
+  if (capabilities.search) tools.push(provider === "openrouter" ? ({ type: "openrouter:web_search" } as unknown as Tool) : { type: "web_search" });
+  if (capabilities.computer && COMPUTER_ENABLED && supportsComputerTool(model)) tools.push({ type: "computer" } as Tool);
 
   // Stateless providers get the whole conversation every time; the app keeps it (trimmed) per chat.
   const history = stateless ? (repo.getHistory(dot.id) as ResponseInputItem[]) : [];
+  const requestHistory = stateless ? [...history, ...input] : [];
+  if (stateless) {
+    // Commit consumed inputs before the request so a failed response cannot replay stale pending calls.
+    repo.setHistory(dot.id, requestHistory);
+    repo.setThread(dot.id, null, null);
+  }
   repo.setActivity(dot.id, "Thinking");
-  const stream = await client.responses.create(
-    stateless
-      ? { model, instructions: systemPrompt(dot, trigger), input: [...history, ...input], tools, parallel_tool_calls: false, store: false, stream: true }
+  const drafts = new Map<string, { id: string; text: string }>();
+  try {
+    const stream = await client.responses.create(
+      stateless
+      ? { model, instructions: systemPrompt(dot, trigger, { computer: capabilities.computer && COMPUTER_ENABLED, search: capabilities.search }), input: [...history, ...input], tools, parallel_tool_calls: false, store: false, stream: true, ...(provider === "chatgpt" ? { include: ["reasoning.encrypted_content" as const], ...(chatGPTUsage.maxOutputTokens ? { max_output_tokens: chatGPTUsage.maxOutputTokens } : {}), ...(chatGPTUsage.reasoning ? { reasoning: chatGPTUsage.reasoning } : {}) } : {}) }
       : {
           model,
-          instructions: systemPrompt(dot, trigger),
+          instructions: systemPrompt(dot, trigger, { computer: capabilities.computer && COMPUTER_ENABLED, search: capabilities.search }),
           input,
           previous_response_id: prevId ?? undefined,
           tools,
@@ -320,12 +344,11 @@ async function respond(dot: Dot, prevId: string | null, input: ResponseInputItem
           store: true,
           stream: true,
         },
-    { signal },
-  );
+      { signal },
+    );
 
-  const drafts = new Map<string, { id: string; text: string }>();
-  let final: Response | null = null;
-  try {
+    const completedItems = new Map<number, ResponseOutputItem>();
+    let final: Response | null = null;
     for await (const ev of stream) {
       switch (ev.type) {
         case "response.output_item.added":
@@ -344,6 +367,7 @@ async function respond(dot: Dot, prevId: string | null, input: ResponseInputItem
           break;
         }
         case "response.output_item.done":
+          completedItems.set(ev.output_index, ev.item);
           if (ev.item.type === "message") {
             const d = drafts.get(ev.item.id);
             if (d) repo.updateMessage(d.id, { text: d.text });
@@ -353,21 +377,32 @@ async function respond(dot: Dot, prevId: string | null, input: ResponseInputItem
           }
           break;
         case "response.completed":
-          final = ev.response;
+          final = ev.response.output.length ? ev.response : { ...ev.response, output: [...completedItems].sort(([a], [b]) => a - b).map(([, item]) => item) };
           break;
         case "response.failed":
-          throw new Error(ev.response.error?.message ?? "The model request failed");
+          if (accountId && ev.response.error?.code) recordChatGPTFailure(accountId, ev.response.error.code);
+          throw terminalError(ev.response);
+        case "response.incomplete":
+          if (accountId && ev.response.error?.code) recordChatGPTFailure(accountId, ev.response.error.code);
+          throw terminalError(ev.response);
         case "error":
-          throw new Error(ev.message);
+          if (accountId && ev.code) recordChatGPTFailure(accountId, ev.code);
+          throw new Error(`Model stream failed (${ev.code ?? "unknown"}).`);
       }
     }
+    if (!final) throw new Error("The model stream ended unexpectedly");
+    if (stateless) {
+      const output = provider === "chatgpt" ? final.output as ResponseInputItem[] : replayable(final.output);
+      repo.setHistory(dot.id, provider === "chatgpt" ? [...requestHistory, ...output] : trimHistory([...requestHistory, ...output]));
+    }
+    return final;
+  } catch (error) {
+    if (accountId && error instanceof OpenAI.APIError && error.code) recordChatGPTFailure(accountId, error.code);
+    throw error;
   } finally {
     // Persist whatever streamed, even if we were stopped mid-sentence.
     for (const d of drafts.values()) repo.updateMessage(d.id, { text: d.text || "…" });
   }
-  if (!final) throw new Error("The model stream ended unexpectedly");
-  if (stateless) repo.setHistory(dot.id, trimHistory([...history, ...input, ...replayable(final.output)]));
-  return final;
 }
 
 /** The parts of a response worth sending back next turn: what the model said and the tools it called. */
@@ -455,7 +490,7 @@ async function processCalls(dot: Dot, pending: Pending, signal: AbortSignal): Pr
     if (def.describe) {
       const action = def.describe(args, ctx);
       repo.setActivity(dot.id, "Checking your rules");
-      const verdict = await review(dot.id, action, (await def.defaultDecision?.(ctx, args)) ?? "allow");
+      const verdict = await review(dot.id, action, (await def.defaultDecision?.(ctx, args)) ?? "allow", await conversationModel(repo.currentConversation(dot.id), dot.model));
       if (verdict.decision === "never") {
         activity(dot.id, "Blocked by your rule", verdict.rule?.action);
         pending.outputs.push({ type: "function_call_output", call_id: call.call_id, output: `Not allowed: the user's rule says never ${verdict.rule?.action ?? "do this"}. Don't try to work around it.` });
@@ -482,6 +517,8 @@ function pauseFor(dot: Dot, pending: Pending, card: CardData): true {
 }
 
 async function execTool(dot: Dot, call: ResponseFunctionToolCall, signal: AbortSignal): Promise<string> {
+  await clientFor(await conversationModel(repo.currentConversation(dot.id), dot.model));
+  signal.throwIfAborted();
   const def = findTool(call.name)!;
   const args = safeParse(call.arguments);
   repo.setActivity(dot.id, def.label);
@@ -540,17 +577,14 @@ setConsult(async (target, message, from, _depth, signal) => {
   if (!channelId) repo.addMessage({ dotId: target.id, role: "user", text: message, from: `dot:${from.name}` });
   repo.setActivity(target.id, `Helping ${from.name}`);
   try {
-    const { client, model, stateless } = clientFor(await modelFor(target.model));
-    const res = await client.responses.create(
-      {
-        model,
-        instructions: systemPrompt(target, { kind: "dot", from: from.name }),
-        input: [...rebuildContext(target.id, message).slice(-12), { role: "user", content: `${from.name} asks: ${message}` }],
-        tools: [stateless ? ({ type: "openrouter:web_search" } as unknown as Tool) : { type: "web_search" }],
-        ...(stateless ? { store: false } : isReasoningModel(model) ? { reasoning: { effort: "low" as const } } : {}),
-      },
-      { signal },
-    );
+    const sourceModel = await conversationModel(repo.currentConversation(from.id), from.model);
+    const appModel = sourceModel.startsWith("chatgpt:") ? sourceModel : await conversationModel(repo.currentConversation(target.id), target.model);
+    const binding = await clientFor(appModel);
+    const res = await completedResponse(binding, {
+      instructions: systemPrompt(target, { kind: "dot", from: from.name }, { computer: false, search: binding.capabilities.search }),
+      input: [...rebuildContext(target.id, message).slice(-12), { role: "user", content: `${from.name} asks: ${message}` }],
+      tools: binding.capabilities.search ? [binding.provider === "openrouter" ? ({ type: "openrouter:web_search" } as unknown as Tool) : { type: "web_search" }] : [],
+    }, signal);
     const reply = res.output_text || "(no reply)";
     // In a channel the member answers in the channel (the user sees the team at work); otherwise in its own chat.
     repo.addMessage({ dotId: target.id, role: "dot", text: reply, from: `dot:${from.name}`, channelId });

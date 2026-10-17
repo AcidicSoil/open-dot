@@ -51,3 +51,8 @@ next-env.d.ts
 /.desktop
 /videos
 .gstack/
+/.codex/
+/.claude/
+
+# Atlas Scout local data
+.atlas/
